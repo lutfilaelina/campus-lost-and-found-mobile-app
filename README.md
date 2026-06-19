@@ -127,4 +127,15 @@ Aplikasi ini dibuat untuk keperluan edukasi dan pengembangan portofolio.
 
 ---
 
+## Pengembang Utama
+MUHAMAD FAHREN ANDREAN RANGKUTI
+
+## Anggota Tim
+1. Intan Komalasari
+2. Lutfi Laeli Nur Afiyah
+3. Agil Syeh Febukhori
+4. Afsani Wahyu Mawardi
+
+---
+
 **Made with ❤️ for Campus Community**
