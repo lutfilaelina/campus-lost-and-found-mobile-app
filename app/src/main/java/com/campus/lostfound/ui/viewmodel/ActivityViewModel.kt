@@ -1,0 +1,224 @@
+package com.campus.lostfound.ui.viewmodel
+
+import android.content.Context
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.campus.lostfound.data.LocalHistoryRepository
+import com.campus.lostfound.data.model.LostFoundItem
+import com.campus.lostfound.data.repository.LostFoundRepository
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.tasks.await
+
+class ActivityViewModel(
+    private val context: Context,
+    private val repository: LostFoundRepository = LostFoundRepository(context)
+) : ViewModel() {
+    
+    private val scope = CoroutineScope(Dispatchers.IO)
+    
+    private val _myReports = MutableStateFlow<List<LostFoundItem>>(emptyList())
+    val myReports: StateFlow<List<LostFoundItem>> = _myReports.asStateFlow()
+
+    // Ubah ke CompletedReport untuk menyimpan info tanggal selesai
+    private val _historyWithDate = MutableStateFlow<List<LocalHistoryRepository.CompletedReport>>(emptyList())
+    val historyWithDate: StateFlow<List<LocalHistoryRepository.CompletedReport>> = _historyWithDate.asStateFlow()
+    
+    // Keep legacy flow for backward compatibility
+    private val _history = MutableStateFlow<List<LostFoundItem>>(emptyList())
+    val history: StateFlow<List<LostFoundItem>> = _history.asStateFlow()
+    
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+    
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+    
+    init {
+        loadMyReports()
+        loadMyHistory()
+    }
+    
+    fun loadMyReports() {
+        viewModelScope.launch {
+            _isLoading.value = true
+            val userId = repository.getCurrentUserId()
+            repository.getUserItems(userId).collect { items ->
+                _myReports.value = items
+                _isLoading.value = false
+            }
+        }
+    }
+
+    fun loadMyHistory() {
+        viewModelScope.launch {
+            // Load dengan info tanggal selesai
+            repository.getCompletedReportsWithDate().collect { completedReports ->
+                val userId = repository.getCurrentUserId()
+                // Filter by current user
+                val userReports = completedReports.filter { it.item.userId == userId }
+                _historyWithDate.value = userReports
+                _history.value = userReports.map { it.item }
+            }
+        }
+    }
+    
+    fun deleteReport(item: LostFoundItem, onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            // ✅ OPTIMISTIC UPDATE: Remove from UI immediately for instant feedback
+            val currentReports = _myReports.value
+            _myReports.value = currentReports.filter { it.id != item.id }
+            android.util.Log.d("ActivityViewModel", "✅ Optimistic delete: Removed ${item.itemName} from UI")
+            
+            // Call success callback immediately for instant UI response
+            onSuccess()
+            
+            // Then delete from Firestore in background
+            val result = repository.deleteItem(item.id, item.imageStoragePath)
+            
+            result.fold(
+                onSuccess = {
+                    android.util.Log.d("ActivityViewModel", "✅ Successfully deleted from Firestore: ${item.itemName}")
+                    // Reload to ensure consistency
+                    loadMyReports()
+                },
+                onFailure = { error ->
+                    android.util.Log.e("ActivityViewModel", "❌ Failed to delete from Firestore: ${error.message}")
+                    // ✅ ROLLBACK: Restore item if delete failed
+                    _myReports.value = currentReports
+                    _errorMessage.value = error.message ?: "Gagal menghapus laporan"
+                }
+            )
+        }
+    }
+    
+    /**
+     * Hapus dari riwayat lokal (hanya untuk laporan yang sudah selesai)
+     */
+    fun deleteFromHistory(itemId: String, onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            // ✅ OPTIMISTIC UPDATE: Remove from UI immediately
+            val currentHistory = _historyWithDate.value
+            _historyWithDate.value = currentHistory.filter { it.item.id != itemId }
+            _history.value = _historyWithDate.value.map { it.item }
+            android.util.Log.d("ActivityViewModel", "✅ Optimistic delete from history: $itemId")
+            
+            // Call success immediately
+            onSuccess()
+            
+            // Delete from local storage in background
+            val success = repository.deleteFromLocalHistory(itemId)
+            
+            if (success) {
+                android.util.Log.d("ActivityViewModel", "✅ Successfully deleted from local history")
+            } else {
+                android.util.Log.e("ActivityViewModel", "❌ Failed to delete from local history")
+                // ✅ ROLLBACK: Restore if failed
+                _historyWithDate.value = currentHistory
+                _history.value = currentHistory.map { it.item }
+                _errorMessage.value = "Gagal menghapus riwayat"
+            }
+        }
+    }
+    
+    fun markAsCompleted(item: LostFoundItem, onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            _isLoading.value = true
+            _errorMessage.value = null
+            
+            val result = repository.markAsCompleted(item.id)
+            
+            result.fold(
+                onSuccess = {
+                    _isLoading.value = false
+                    // Reload both active reports and history to reflect changes immediately
+                    loadMyReports()
+                    loadMyHistory()
+                    onSuccess()
+                },
+                onFailure = { error ->
+                    _isLoading.value = false
+                    _errorMessage.value = error.message ?: "Gagal memperbarui laporan"
+                }
+            )
+        }
+    }
+    
+    fun updateReport(
+        itemId: String,
+        itemName: String? = null,
+        category: com.campus.lostfound.data.model.Category? = null,
+        location: String? = null,
+        description: String? = null,
+        whatsappNumber: String? = null,
+        imageUri: android.net.Uri? = null,
+        onSuccess: () -> Unit
+    ) {
+        viewModelScope.launch {
+            _isLoading.value = true
+            _errorMessage.value = null
+            
+            val result = repository.updateItem(
+                itemId = itemId,
+                itemName = itemName,
+                category = category,
+                location = location,
+                description = description,
+                whatsappNumber = whatsappNumber,
+                imageUri = imageUri
+            )
+            
+            result.fold(
+                onSuccess = {
+                    _isLoading.value = false
+                    
+                    // Broadcast notifikasi STATUS_CHANGED ke semua user
+                    val localNotifRepo = com.campus.lostfound.data.LocalNotificationRepository.getInstance(context)
+                    scope.launch {
+                        try {
+                            // Get item details untuk membuat notifikasi yang informatif
+                            val itemSnapshot = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                                .collection("items")
+                                .document(itemId)
+                                .get()
+                                .await()
+                            
+                            val item = itemSnapshot.toObject(com.campus.lostfound.data.model.LostFoundItem::class.java)
+                            if (item != null) {
+                                val changes = buildString {
+                                    if (itemName != null) append("nama, ")
+                                    if (category != null) append("kategori, ")
+                                    if (location != null) append("lokasi, ")
+                                    if (description != null) append("deskripsi, ")
+                                    if (whatsappNumber != null) append("kontak, ")
+                                    if (imageUri != null) append("foto, ")
+                                }.removeSuffix(", ")
+                                
+                                localNotifRepo.addNotification(
+                                    title = "🔄 Laporan Diperbarui",
+                                    body = "\"${item.itemName}\" - Perubahan: $changes",
+                                    type = "STATUS_CHANGED",
+                                    itemId = itemId
+                                )
+                                android.util.Log.d("ActivityViewModel", "STATUS_CHANGED notification sent for: ${item.itemName}")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("ActivityViewModel", "Failed to send status notification", e)
+                        }
+                    }
+                    
+                    onSuccess()
+                },
+                onFailure = { error ->
+                    _isLoading.value = false
+                    _errorMessage.value = error.message ?: "Gagal memperbarui laporan"
+                }
+            )
+        }
+    }
+}
+
